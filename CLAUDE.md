@@ -49,7 +49,7 @@ Run from `qxlog/`:
 - **Field keys must exactly match DB column names.** A typo means silently dropped data on write and blank cells on export.
 - If you add a field: update `EMPTY`, add it to the relevant wizard step JSX, add it to `ALL_COLUMNS` (`App.jsx:58`) if it should be exportable, **and** add the column in Supabase. All four or it breaks.
 - `follow_ups` = array of `{fecha_revision, consolidacion, resultado_escala, resultado_funcional, complicacion_tardia, reintervencion, reintervencion_motivo, date}`, appended by `handleAddFollowUp`.
-- Images: `imagen_url` holds a base64 **data URL** (no object storage). See GAPS.md #5 before touching image handling.
+- Images: `imagen_url` now holds a **Storage object path** (private bucket `rx`) for new uploads; **legacy rows may hold a base64 `data:` URL** and still render. Upload/downscale/sign logic is the `storage` helper + `downscaleImage` + `RxImage` component in `App.jsx`; `isStoragePath()` distinguishes new vs. legacy. Requires the `rx` bucket to exist (`supabase/setup-storage.sql`). Always render images via `<RxImage value={...}/>`, never a bare `<img src={imagen_url}>` (a raw storage path is not a usable URL). See GAPS.md #5.
 
 ## Gotchas (look-like-they-work-but-don't)
 - Editing `App.css`/`index.css` does nothing visible — the inline `<style>` wins. (`App.css` isn't even imported.)

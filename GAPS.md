@@ -43,16 +43,14 @@ Honest, unvarnished list of weaknesses. Ordered **most severe first**. Each item
 - **Suggested fix:** In each handler, guard the response: `if (!updated) throw new Error(...)` before touching `records`; log `res.status` + body text in the `db` methods so failures are diagnosable.
 
 ### 5. Radiology images stored as base64 data URLs inside table rows
-- **What:** `handleImageUpload` (`App.jsx:212`) inlines the whole image as a data URL into `imagen_url`, persisted as a column and re-fetched with every `getAll()`.
-- **Where:** `App.jsx:212–218`, `imagen_url` column.
-- **Why it matters:** A single X-ray is easily 1–5 MB → base64 adds ~33%. Every app load re-downloads *all* images for *all* records (no pagination), so load time and memory grow without bound. Also risks hitting Postgres row/size limits.
-- **Suggested fix:** Move images to Supabase Storage: upload the file, store only the returned path/URL in `imagen_url`. Add client-side downscaling (canvas) before upload. Migrate existing rows in a one-off script.
+- **STATUS (2026-07-08): FIXED for new images (dashboard step required to enable).** Images now upload to a private Supabase Storage bucket `rx` via the `storage` helper in `App.jsx`; the row keeps only a short object path. Display goes through short-lived signed URLs (`RxImage` component), and uploads are downscaled client-side (`downscaleImage`, canvas → JPEG, max 1920px). **Legacy base64 rows still render** (backward-compatible via `isStoragePath`). **Owner must run `supabase/setup-storage.sql` once** to create the bucket + policy, or image upload will fail (the rest of the app is unaffected). *Not migrated:* existing base64 rows stay base64 (harmless, just heavy); a one-off backfill script could move them if desired. *Not handled:* replacing an image on edit orphans the old object (cheap; delete does clean up).
+- **What (original):** `handleImageUpload` inlined the whole image as a data URL into `imagen_url`, persisted as a column and re-fetched with every `getAll()`.
+- **Why it mattered:** A single X-ray is easily 1–5 MB → base64 adds ~33%. Every app load re-downloaded *all* images for *all* records, so load time and memory grew without bound.
 
 ### 6. No pagination — `getAll()` loads the entire table on every mount
-- **What:** `GET /rest/v1/cirugias?order=fecha.desc` with no `Range`/`limit` (`App.jsx:9`). All records + all embedded images + all follow-up JSON come down at once.
-- **Where:** `db.getAll` (`App.jsx:8–14`), called in `useEffect` (`:204`).
-- **Why it matters:** Combined with #5, this is the app's main scalability cliff.
-- **Suggested fix:** Add `&limit=200` and, when needed, PostgREST range headers for pagination; load images lazily (fetch the image column only when opening `detail`).
+- **STATUS (2026-07-08): Largely mitigated by #5; intentionally not adding hard pagination.** With images out of the rows, `getAll` now returns only light text + small follow-up JSON, so loading the full table is cheap at personal scale (hundreds–low thousands of rows). Real pagination is deliberately avoided because `stats`, the filter option lists, "similar cases", and "export all" all assume `records` is the complete set — a naive `limit` would silently hide medical records. If the dataset ever gets large, the right move is server-side stats + a paged list view, not a bare `limit`.
+- **What (original):** `GET /rest/v1/cirugias?order=fecha.desc` with no `Range`/`limit`; all records + embedded images came down at once.
+- **Why it mattered:** Combined with #5 (images in rows), this was the app's main scalability cliff — now removed.
 
 ---
 

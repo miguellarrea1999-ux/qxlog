@@ -67,8 +67,8 @@ accessToken = auth.session?.access_token || null;
 // Every request carries the anon key as `apikey` (the gateway key) and the
 // user's JWT as `Authorization` (the identity). On a 401 we transparently
 // refresh the token once; if that fails we hand control back to the login gate.
-async function sbFetch(path, options = {}, retry = true) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+async function authFetch(url, options = {}, retry = true) {
+  const res = await fetch(url, {
     ...options,
     headers: {
       apikey: SUPABASE_KEY,
@@ -78,11 +78,69 @@ async function sbFetch(path, options = {}, retry = true) {
   });
   if (res.status === 401 && retry) {
     const refreshed = await auth.refresh();
-    if (refreshed) return sbFetch(path, options, false);
+    if (refreshed) return authFetch(url, options, false);
     onAuthLost();
   }
   return res;
 }
+const sbFetch = (path, options, retry) => authFetch(`${SUPABASE_URL}/rest/v1/${path}`, options, retry);
+
+// --- Image storage ------------------------------------------------------
+// Radiology images live in a private Storage bucket `rx` (see
+// supabase/setup-storage.sql). The DB row stores only the object path; the
+// image itself is fetched through a short-lived signed URL so it stays private.
+const RX_BUCKET = "rx";
+const storage = {
+  async upload(file) {
+    const ext = ((file.name || "rx").split(".").pop() || "jpg").toLowerCase();
+    const path = `${crypto.randomUUID()}.${ext}`;
+    const res = await authFetch(`${SUPABASE_URL}/storage/v1/object/${RX_BUCKET}/${path}`, {
+      method: "POST",
+      headers: { "Content-Type": file.type || "application/octet-stream" },
+      body: file,
+    });
+    if (!res.ok) throw new Error("Error al subir imagen");
+    return path;
+  },
+  async signedUrl(path, expiresIn = 3600) {
+    const res = await authFetch(`${SUPABASE_URL}/storage/v1/object/sign/${RX_BUCKET}/${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expiresIn }),
+    });
+    if (!res.ok) throw new Error("Error al firmar URL");
+    const { signedURL } = await res.json();
+    return `${SUPABASE_URL}/storage/v1${signedURL}`;
+  },
+  async remove(path) {
+    try {
+      await authFetch(`${SUPABASE_URL}/storage/v1/object/${RX_BUCKET}/${path}`, { method: "DELETE" });
+    } catch { /* best effort — orphaned objects are harmless */ }
+  },
+};
+
+// Shrink large images before upload (X-ray screenshots can be several MB).
+// Falls back to the original file if anything goes wrong or it's already small.
+async function downscaleImage(file, maxDim = 1920, quality = 0.85) {
+  if (!file.type?.startsWith("image/")) return file;
+  if (file.size < 800 * 1024) return file; // already small
+  try {
+    const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+    const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
+    const w = Math.round(bitmap.width * scale), h = Math.round(bitmap.height * scale);
+    const canvas = document.createElement("canvas");
+    canvas.width = w; canvas.height = h;
+    canvas.getContext("2d").drawImage(bitmap, 0, 0, w, h);
+    const blob = await new Promise((r) => canvas.toBlob(r, "image/jpeg", quality));
+    if (!blob) return file;
+    return new File([blob], (file.name || "rx").replace(/\.\w+$/, "") + ".jpg", { type: "image/jpeg" });
+  } catch {
+    return file;
+  }
+}
+
+// Is this a storage path (new) rather than an inline data URL (legacy) or http URL?
+const isStoragePath = (v) => !!v && !/^(data:|blob:|https?:)/.test(v);
 
 const db = {
   async getAll() {
@@ -244,6 +302,26 @@ const Bar = ({data,color="#58a6ff"}) => {
   ))}</div>;
 };
 
+// Renders a radiology image whether it's a legacy inline data URL or a new
+// Storage path (resolved to a short-lived signed URL). Renders nothing if empty.
+function RxImage({ value, alt = "Rx", style, className }) {
+  const needsSign = isStoragePath(value);
+  const [signed, setSigned] = useState({ v: null, url: "" });
+  useEffect(() => {
+    if (!needsSign) return;
+    let cancel = false;
+    storage.signedUrl(value)
+      .then((u) => { if (!cancel) setSigned({ v: value, url: u }); })
+      .catch(() => { if (!cancel) setSigned({ v: value, url: "" }); });
+    return () => { cancel = true; };
+  }, [value, needsSign]);
+  // Non-storage values (legacy data:/blob:/http) render directly; storage paths
+  // wait for the signed URL that matches the current value.
+  const src = needsSign ? (signed.v === value ? signed.url : "") : (value || "");
+  if (!src) return null;
+  return <img src={src} alt={alt} style={style} className={className} />;
+}
+
 function Login({ onLogin }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -299,6 +377,7 @@ export default function App() {
   const [dbError, setDbError] = useState(false);
   const [quickMode, setQuickMode] = useState(false);
   const [imgPreview, setImgPreview] = useState(null);
+  const [uploadingImg, setUploadingImg] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
   const [selectedCols, setSelectedCols] = useState(ALL_COLUMNS.map(c=>c.key));
   const [presentMode, setPresentMode] = useState(false);
@@ -308,9 +387,10 @@ export default function App() {
 
   useEffect(()=>{ onAuthLost = () => { setSession(null); setRecords([]); }; },[]);
 
+  const envMissing = !SUPABASE_URL||!SUPABASE_KEY;
   useEffect(()=>{
     if(!session) return;
-    if(!SUPABASE_URL||!SUPABASE_KEY){setDbError(true);return;}
+    if(envMissing) return;
     let cancelled = false;
     (async()=>{
       if(auth.isExpired()){ const s = await auth.refresh(); if(!s){ setSession(null); return; } }
@@ -320,23 +400,32 @@ export default function App() {
       finally { if(!cancelled) setLoading(false); }
     })();
     return ()=>{ cancelled = true; };
-  },[session]);
+  },[session,envMissing]);
 
   const handleLogout = async () => { await auth.signOut(); setSession(null); setRecords([]); setView("home"); };
 
   const set = f => v => setForm(p=>({...p,[f]:v}));
 
-  const handleImageUpload = e => {
+  const handleImageUpload = async e => {
     const file = e.target.files[0];
     if(!file) return;
-    const reader = new FileReader();
-    reader.onload = ev => { setImgPreview(ev.target.result); setForm(p=>({...p,imagen_url:ev.target.result})); };
-    reader.readAsDataURL(file);
+    setImgPreview(URL.createObjectURL(file)); // instant local preview
+    setUploadingImg(true);
+    try {
+      const compact = await downscaleImage(file);
+      const path = await storage.upload(compact);
+      setForm(p=>({...p,imagen_url:path}));
+      showToast("✓ Imagen subida");
+    } catch {
+      setImgPreview(null);
+      setForm(p=>({...p,imagen_url:""}));
+      showToast("Error al subir la imagen","error");
+    } finally { setUploadingImg(false); }
   };
 
   const startEdit = (r) => {
     setForm({...EMPTY,...r});
-    setImgPreview(r.imagen_url||null);
+    setImgPreview(null); // saved image (if any) renders from form.imagen_url via <RxImage>
     setEditId(r.id);
     setStep(1);
     setQuickMode(false);
@@ -365,7 +454,12 @@ export default function App() {
   const handleDelete = async id => {
     if(!confirm("¿Eliminar este registro?")) return;
     setLoading(true);
-    try { await db.delete(id); setRecords(p=>p.filter(r=>r.id!==id)); showToast("Eliminado"); setView("list"); }
+    const img = records.find(r=>r.id===id)?.imagen_url;
+    try {
+      await db.delete(id);
+      if(isStoragePath(img)) storage.remove(img); // best effort, don't block
+      setRecords(p=>p.filter(r=>r.id!==id)); showToast("Eliminado"); setView("list");
+    }
     catch { showToast("Error al eliminar","error"); }
     finally { setLoading(false); }
   };
@@ -688,7 +782,7 @@ export default function App() {
               </div>
             </div>
             {selected.tecnica&&<div className="present-block" style={{marginBottom:20}}><div className="present-block-title">Técnica quirúrgica</div><p style={{fontSize:13,color:"#bbb",lineHeight:1.6}}>{selected.tecnica}</p></div>}
-            {selected.imagen_url&&<img src={selected.imagen_url} alt="Rx" style={{maxWidth:"100%",borderRadius:8,border:"1px solid #222"}}/>}
+            {selected.imagen_url&&<RxImage value={selected.imagen_url} style={{maxWidth:"100%",borderRadius:8,border:"1px solid #222"}}/>}
           </div>
         </div>
       )}
@@ -737,7 +831,7 @@ export default function App() {
         </div>
       </header>
 
-      {dbError&&<div className="banner">⚠️ Sin conexión a Supabase — configura VITE_SUPABASE_URL y VITE_SUPABASE_ANON_KEY</div>}
+      {(dbError||envMissing)&&<div className="banner">⚠️ Sin conexión a Supabase — configura VITE_SUPABASE_URL y VITE_SUPABASE_ANON_KEY</div>}
       {loading&&<div className="lbar"/>}
 
       <main className="main">
@@ -845,9 +939,12 @@ export default function App() {
               <hr className="div"/>
               <div className="fg" style={{marginBottom:14}}>
                 <label>Imagen radiológica (Rx pre/postoperatoria)</label>
-                <div className="img-box" onClick={()=>imgRef.current.click()}>
+                <div className="img-box" onClick={()=>!uploadingImg&&imgRef.current.click()}>
                   <input ref={imgRef} type="file" accept="image/*" onChange={handleImageUpload}/>
-                  {imgPreview?<img src={imgPreview} alt="Rx" className="img-preview"/>:<div className="img-label">📷 Toca para adjuntar imagen</div>}
+                  {uploadingImg?<div className="img-label">Subiendo imagen…</div>
+                   :imgPreview?<img src={imgPreview} alt="Rx" className="img-preview"/>
+                   :form.imagen_url?<RxImage value={form.imagen_url} className="img-preview"/>
+                   :<div className="img-label">📷 Toca para adjuntar imagen</div>}
                 </div>
               </div>
             </>}
@@ -965,7 +1062,7 @@ export default function App() {
               <div className="ii"><label>Injerto</label><span className={selected.injerto&&selected.injerto!=="No"?"":"empty"}>{selected.injerto||"—"}</span></div>
             </div>
             {selected.tecnica&&<div style={{marginTop:10}}><div className="ii"><label>Técnica</label><span>{selected.tecnica}</span></div></div>}
-            {selected.imagen_url&&<div style={{marginTop:12}}><div className="ii"><label>Imagen radiológica</label></div><img src={selected.imagen_url} alt="Rx" style={{maxWidth:"100%",borderRadius:"var(--rr)",marginTop:6,border:"1px solid var(--bd)"}}/></div>}
+            {selected.imagen_url&&<div style={{marginTop:12}}><div className="ii"><label>Imagen radiológica</label></div><RxImage value={selected.imagen_url} style={{maxWidth:"100%",borderRadius:"var(--rr)",marginTop:6,border:"1px solid var(--bd)"}}/></div>}
           </div>
 
           <div className="ib">

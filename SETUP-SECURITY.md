@@ -53,6 +53,20 @@ This is the step that actually stops strangers from reaching your patient data.
 
 ---
 
+## Step 2b — Enable image storage (needed to attach X-rays)
+X-ray images now live in a private storage area instead of bloating the database.
+This one-time step creates that storage. If you skip it, everything else works but
+attaching an image will fail.
+
+1. In the left sidebar, click **SQL Editor** → **+ New query**.
+2. Open the file `supabase/setup-storage.sql` from this project, copy everything, paste
+   it in, and click **Run**.
+3. You should see **"Success. No rows returned."**
+
+✅ You can now attach radiology images, and they stay private (only you can view them).
+
+---
+
 ## Step 3 — Test that it all works
 Run the app on your own computer to confirm you can still log in and see your surgeries.
 
