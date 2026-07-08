@@ -28,7 +28,7 @@ Run from `qxlog/`:
 ## Auth model (added 2026-07-08)
 - The app is gated behind **Supabase Auth** (email + password) — see the `Login` component and the `auth` helper in `App.jsx`. No account = no access.
 - Identity flows through `sbFetch` (`App.jsx`): every DB call sends the anon key as `apikey` and the **logged-in user's JWT** as `Authorization: Bearer`. On a 401 it refreshes the token once, else it bounces to login. The session is cached in `localStorage` under `qxlog_session`.
-- **Server-side is what actually secures data:** RLS must be enabled on `cirugias` (script: `supabase/enable-rls.sql`). Owner-only manual steps that code cannot do: rotate the anon key, run that SQL, and create the login user in the Supabase dashboard. The client login screen alone is *not* protection if RLS is off.
+- **Server-side is what actually secures data:** RLS must be enabled on `cirugias` (script: `supabase/enable-rls.sql`; user-facing guide: `SETUP-SECURITY.md`). Owner-only manual steps that code cannot do: run that SQL, and create the login user in the Supabase dashboard. The client login screen alone is *not* protection if RLS is off. The `anon` key is public by design and does **not** need rotating once RLS is on; never put the `service_role` key in the app/repo (it bypasses RLS).
 - If you run the app and can't get past the login screen, the Supabase Auth user hasn't been created yet — create it in Authentication → Users.
 
 ## Where things live

@@ -1,14 +1,17 @@
 -- QxLog — lock down the `cirugias` table with Row-Level Security.
 --
--- WHY: today the table is reachable with the public "anon" key, which is shipped
--- in the browser bundle. Anyone with that key can read/edit/delete every patient
--- record. This script blocks the anon role entirely and allows access only to a
--- logged-in (authenticated) user. QxLog is single-user, so "must be logged in"
--- is enough — no per-row user_id is required.
+-- WHY: today the table is reachable using the public "anon" key with no
+-- restrictions, so anyone with that key can read/edit/delete every patient
+-- record. The `anon` key is *designed* to be public (it ships in the browser);
+-- the thing that makes it safe is Row-Level Security. This script turns RLS on
+-- and allows access only to a logged-in (authenticated) user. QxLog is
+-- single-user, so "must be logged in" is enough — no per-row user_id is required.
+--
+-- Running this script IS the fix. You do NOT need to rotate the anon key
+-- afterwards — once RLS is on, the public anon key can do nothing useful.
 --
 -- HOW TO RUN: Supabase dashboard → SQL Editor → paste this → Run.
--- Do this AFTER you have created your login user (Authentication → Users → Add user),
--- and rotate the anon key afterwards (Project Settings → API → Rotate).
+-- Do this AFTER you have created your login user (Authentication → Users → Add user).
 
 -- 1. Turn on RLS. With RLS on and no permissive policy, ALL access is denied by
 --    default — including the anon key. This is the line that actually secures data.

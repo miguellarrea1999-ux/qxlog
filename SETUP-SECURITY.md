@@ -1,9 +1,17 @@
 # QxLog — Security Setup Guide
 
 A plain, click-by-click guide to finish securing QxLog. The code side is already
-done; these are the steps that can only be done in the Supabase dashboard.
+done; there are just **two actions** in the Supabase dashboard, then a test.
 
 **Do the steps in order — don't skip ahead.**
+
+## The one thing to understand
+Your app's `anon` / `public` key is meant to be public — it ships inside the browser.
+On its own it isn't a secret. What actually protects your patient data is a database
+feature called **Row-Level Security (RLS)**. Turning RLS on (Step 2) is the real fix.
+Supabase confirms this on the API keys screen: *"This key is safe to use in a browser
+if you have enabled Row Level Security."* So you do **not** need to rotate or change any
+keys — just enable RLS.
 
 ---
 
@@ -30,7 +38,7 @@ This is what you'll use to log into the app. Do it first so you don't lock yours
 
 ---
 
-## Step 2 — Turn on the lock (RLS)
+## Step 2 — Turn on the lock (RLS) — this is the fix
 This is the step that actually stops strangers from reaching your patient data.
 
 1. In the left sidebar, click **SQL Editor**.
@@ -41,53 +49,56 @@ This is the step that actually stops strangers from reaching your patient data.
 5. You should see **"Success. No rows returned."** at the bottom. That's correct — it
    means it worked.
 
-✅ The database is now locked to logged-in users only.
+✅ The database is now locked to logged-in users only. **Your data is secure.**
 
 ---
 
-## Step 3 — Replace the old key
-The old key is public on GitHub. This step makes it useless.
+## Step 3 — Test that it all works
+Run the app on your own computer to confirm you can still log in and see your surgeries.
 
-1. In the left sidebar, click **Project Settings** (the gear icon at the bottom).
-2. Click **API** (or **API Keys**).
-3. Find the **anon / public** key. Next to it, click **Reset** / **Rotate** (there may
-   be a small "⋯" menu). Confirm.
-4. A **new** anon key appears. Click to **copy** it.
+1. Open a terminal: press **Start**, type **PowerShell**, open it.
+2. Go into your project folder — type this and press **Enter**:
 
-Now update your app's local file so it keeps working:
+   ```
+   cd C:\Users\migue\qxlog
+   ```
 
-5. Open the file `qxlog/.env` on your computer in a text editor.
-6. Replace the long value after `VITE_SUPABASE_ANON_KEY=` with the **new** key you just
-   copied. Save the file.
-
-✅ The leaked key is now dead; your app uses the new one.
-
----
-
-## Step 4 — Test it
-1. In a terminal, go into the `qxlog` folder and run:
+3. Start the app — type this and press **Enter**:
 
    ```
    npm run dev
    ```
 
-2. Open the address it prints (usually **http://localhost:5173**).
-3. You should see the **login screen**. Enter the email + password from Step 1 → click
-   **Entrar**.
-4. Your surgery list should load normally.
+4. It prints a few lines, including one like `Local:  http://localhost:5173/`.
+   Hold **Ctrl** and click that link (or paste it into your browser).
+5. You should see a **login screen** with **Correo** and **Contraseña** boxes.
+6. Enter the email + password from **Step 1**, click **Entrar**.
+7. Your list of surgeries should load, just like before.
 
-✅ If you can log in and see your cases, everything is done and secure.
+✅ If you can log in and see your cases, **everything is done and your data is secure.**
+
+To stop the app when you're finished: go back to PowerShell and press **Ctrl + C**.
+
+---
+
+## Two things NOT to touch on the API keys screen
+- ❌ **Don't click "Disable legacy API keys" / "Disable JWT-based API keys."** The app
+  uses the legacy `anon` key — disabling it would break the app.
+- 🔒 The **`service_role` `secret`** key (hidden behind "Reveal") is the dangerous one —
+  it bypasses RLS. It was never in your code, and it must never go into the app or `.env`.
+  Leave it hidden.
+
+You do **not** need to rotate or change the `anon` key. Leave your `.env` as it is.
 
 ---
 
 ## If something goes wrong
-- **Can't log in** → the email/password doesn't match Step 1, or "Auto Confirm" was off.
-  Redo Step 1.
-- **Login works but the list is empty / "Error de conexión"** → the key in `.env` doesn't
-  match the new one from Step 3, or you need to fully restart `npm run dev` after editing
-  `.env`.
-- **App loads the list without asking you to log in** → your browser cached an old session;
-  hard-refresh (Ctrl+Shift+R).
+- **Can't log in ("Credenciales incorrectas")** → the email/password doesn't match Step 1.
+  Recheck it in Supabase → Authentication → Users.
+- **Login works but the list is empty / "Error de conexión"** → RLS may not have run
+  correctly; re-run Step 2. (You did not change any key, so the key isn't the issue.)
+- **App shows your surgeries without asking you to log in** → your browser remembered an
+  old session; hard-refresh with **Ctrl + Shift + R**.
 
 ---
 
