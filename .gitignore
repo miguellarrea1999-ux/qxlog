@@ -12,6 +12,12 @@ dist
 dist-ssr
 *.local
 
+# Secrets — never commit real credentials. Use .env.example for placeholders.
+.env
+.env.*
+!.env.example
+urls.env
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

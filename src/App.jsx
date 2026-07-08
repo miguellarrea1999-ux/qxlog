@@ -4,37 +4,112 @@ import * as XLSX from "xlsx";
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || "";
 const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
 
+// --- Auth ---------------------------------------------------------------
+// Supabase Auth via raw REST (keeps the no-dependency pattern of the rest of
+// the app). The user's access token — not the anon key — is what proves
+// identity to the database; RLS then allows only authenticated requests.
+const SESSION_KEY = "qxlog_session";
+let accessToken = null; // module-level: read by sbFetch on every DB call
+let onAuthLost = () => {}; // App sets this to bounce the UI back to login
+
+const auth = {
+  session: JSON.parse(localStorage.getItem(SESSION_KEY) || "null"),
+  save(s) {
+    this.session = s;
+    accessToken = s?.access_token || null;
+    localStorage.setItem(SESSION_KEY, JSON.stringify(s));
+  },
+  clear() {
+    this.session = null;
+    accessToken = null;
+    localStorage.removeItem(SESSION_KEY);
+  },
+  isExpired() {
+    const exp = this.session?.expires_at; // unix seconds
+    return !exp || Date.now() / 1000 > exp - 60;
+  },
+  async signIn(email, password) {
+    const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+      method: "POST",
+      headers: { apikey: SUPABASE_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    if (!res.ok) throw new Error("Credenciales incorrectas");
+    const s = await res.json();
+    this.save(s);
+    return s;
+  },
+  async refresh() {
+    if (!this.session?.refresh_token) { this.clear(); return null; }
+    const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+      method: "POST",
+      headers: { apikey: SUPABASE_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: this.session.refresh_token }),
+    });
+    if (!res.ok) { this.clear(); return null; }
+    const s = await res.json();
+    this.save(s);
+    return s;
+  },
+  async signOut() {
+    try {
+      await fetch(`${SUPABASE_URL}/auth/v1/logout`, {
+        method: "POST",
+        headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${this.session?.access_token}` },
+      });
+    } catch { /* ignore network errors on logout */ }
+    this.clear();
+  },
+};
+accessToken = auth.session?.access_token || null;
+
+// --- Data access --------------------------------------------------------
+// Every request carries the anon key as `apikey` (the gateway key) and the
+// user's JWT as `Authorization` (the identity). On a 401 we transparently
+// refresh the token once; if that fails we hand control back to the login gate.
+async function sbFetch(path, options = {}, retry = true) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    ...options,
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${accessToken || SUPABASE_KEY}`,
+      ...(options.headers || {}),
+    },
+  });
+  if (res.status === 401 && retry) {
+    const refreshed = await auth.refresh();
+    if (refreshed) return sbFetch(path, options, false);
+    onAuthLost();
+  }
+  return res;
+}
+
 const db = {
   async getAll() {
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/cirugias?order=fecha.desc`, {
-      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
-    });
+    const res = await sbFetch(`cirugias?order=fecha.desc`);
     if (!res.ok) throw new Error("Error al cargar");
     return res.json();
   },
   async insert(record) {
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/cirugias`, {
+    const res = await sbFetch(`cirugias`, {
       method: "POST",
-      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json", Prefer: "return=representation" },
+      headers: { "Content-Type": "application/json", Prefer: "return=representation" },
       body: JSON.stringify(record),
     });
     if (!res.ok) throw new Error("Error al guardar");
     return res.json();
   },
   async update(id, data) {
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/cirugias?id=eq.${id}`, {
+    const res = await sbFetch(`cirugias?id=eq.${id}`, {
       method: "PATCH",
-      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json", Prefer: "return=representation" },
+      headers: { "Content-Type": "application/json", Prefer: "return=representation" },
       body: JSON.stringify(data),
     });
     if (!res.ok) throw new Error("Error al actualizar");
     return res.json();
   },
   async delete(id) {
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/cirugias?id=eq.${id}`, {
-      method: "DELETE",
-      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
-    });
+    const res = await sbFetch(`cirugias?id=eq.${id}`, { method: "DELETE" });
     if (!res.ok) throw new Error("Error al eliminar");
   },
 };
@@ -110,8 +185,6 @@ const exportCustom = (records, selectedCols) => {
   XLSX.writeFile(wb, `QxLog_export_${new Date().toISOString().slice(0,10)}.xlsx`);
 };
 
-const exportAll = (records) => exportCustom(records, ALL_COLUMNS);
-
 const generateMemoria = (records) => {
   const byType = {};
   const byImplant = {};
@@ -171,7 +244,39 @@ const Bar = ({data,color="#58a6ff"}) => {
   ))}</div>;
 };
 
+function Login({ onLogin }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submit = async (e) => {
+    e.preventDefault();
+    setErr(""); setBusy(true);
+    try { const s = await auth.signIn(email.trim(), password); onLogin(s); }
+    catch { setErr("Credenciales incorrectas"); }
+    finally { setBusy(false); }
+  };
+  const wrap = { minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#0d1117", color: "#e6edf3", fontFamily: "'DM Mono',monospace", padding: 20 };
+  const card = { background: "#161b22", border: "1px solid #30363d", borderRadius: 8, padding: 28, width: "100%", maxWidth: 340 };
+  const inp = { width: "100%", background: "#0d1117", border: "1px solid #30363d", borderRadius: 8, color: "#e6edf3", fontFamily: "'DM Mono',monospace", fontSize: 13, padding: "9px 11px", marginBottom: 12, outline: "none" };
+  const btn = { width: "100%", background: "#58a6ff", color: "#000", border: "none", borderRadius: 8, fontFamily: "'DM Mono',monospace", fontSize: 13, fontWeight: 500, padding: "10px", cursor: busy ? "not-allowed" : "pointer", opacity: busy ? 0.6 : 1 };
+  return (
+    <div style={wrap}>
+      <form style={card} onSubmit={submit}>
+        <div style={{ fontFamily: "'DM Serif Display',serif", fontSize: 22, color: "#58a6ff", marginBottom: 4 }}>QxLog</div>
+        <div style={{ fontSize: 11, color: "#7d8590", marginBottom: 20 }}>Registro quirúrgico · acceso privado</div>
+        <input style={inp} type="email" placeholder="Correo" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" required />
+        <input style={inp} type="password" placeholder="Contraseña" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" required />
+        {err && <div style={{ fontSize: 11, color: "#f85149", marginBottom: 12 }}>{err}</div>}
+        <button style={btn} type="submit" disabled={busy}>{busy ? "Entrando…" : "Entrar"}</button>
+        {(!SUPABASE_URL || !SUPABASE_KEY) && <div style={{ fontSize: 10, color: "#f85149", marginTop: 12 }}>Falta configurar VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY.</div>}
+      </form>
+    </div>
+  );
+}
+
 export default function App() {
+  const [session, setSession] = useState(auth.session);
   const [view, setView] = useState("home");
   const [step, setStep] = useState(1);
   const [form, setForm] = useState(EMPTY);
@@ -201,11 +306,23 @@ export default function App() {
 
   const showToast = (msg,type="success") => { setToast({msg,type}); setTimeout(()=>setToast(null),2500); };
 
+  useEffect(()=>{ onAuthLost = () => { setSession(null); setRecords([]); }; },[]);
+
   useEffect(()=>{
+    if(!session) return;
     if(!SUPABASE_URL||!SUPABASE_KEY){setDbError(true);return;}
-    setLoading(true);
-    db.getAll().then(setRecords).catch(()=>{setDbError(true);showToast("Error de conexión","error");}).finally(()=>setLoading(false));
-  },[]);
+    let cancelled = false;
+    (async()=>{
+      if(auth.isExpired()){ const s = await auth.refresh(); if(!s){ setSession(null); return; } }
+      setLoading(true);
+      try { const data = await db.getAll(); if(!cancelled) setRecords(data); }
+      catch { if(!cancelled){ setDbError(true); showToast("Error de conexión","error"); } }
+      finally { if(!cancelled) setLoading(false); }
+    })();
+    return ()=>{ cancelled = true; };
+  },[session]);
+
+  const handleLogout = async () => { await auth.signOut(); setSession(null); setRecords([]); setView("home"); };
 
   const set = f => v => setForm(p=>({...p,[f]:v}));
 
@@ -330,6 +447,8 @@ export default function App() {
 
   const [notesEdit, setNotesEdit] = useState("");
   const [editingNotes, setEditingNotes] = useState(false);
+
+  if(!session) return <Login onLogin={setSession}/>;
 
   return (
     <div className="app">
@@ -614,6 +733,7 @@ export default function App() {
             <button className="nb outline" onClick={()=>setShowExportModal(true)}>↓ Excel</button>
             <button className="nb pout" onClick={()=>generateMemoria(records)}>📄</button>
           </>}
+          <button className="nb outline" onClick={handleLogout} title="Cerrar sesión">Salir</button>
         </div>
       </header>
 
